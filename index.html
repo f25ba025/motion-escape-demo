@@ -2,100 +2,188 @@
 <html lang="ja">
 <head>
 <meta charset="UTF-8">
-<title>腕振りランナー - イノシシ追走版</title>
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>腕振りランナー - クォータービュー・イノシシ追走版</title>
 <style>
-body{margin:0;background:#111;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center}
-#wrap{position:relative;margin-top:10px}
-#game{background:#8fd3ff;border-radius:8px;max-width:96vw}
-#cam{position:absolute;right:8px;top:8px;width:200px;height:150px;border:2px solid #fff;border-radius:6px;transform:scaleX(-1);background:#000}
-#msg{margin:8px;font-size:14px;color:#ccc;text-align:center}
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    margin: 0;
+    background: #0f172a;
+    color: #fff;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  #wrap {
+    position: relative;
+    margin-top: 10px;
+    box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.04);
+    border-radius: 12px;
+    overflow: hidden;
+    border: 2px solid #334155;
+  }
+  #game {
+    background: #1e293b;
+    display: block;
+    max-width: 96vw;
+  }
+  #cam {
+    position: absolute;
+    right: 12px;
+    top: 12px;
+    width: 180px;
+    height: 135px;
+    border: 2px solid rgba(255, 255, 255, 0.8);
+    border-radius: 8px;
+    transform: scaleX(-1);
+    background: #000;
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.3);
+  }
+  #msg {
+    margin: 12px 16px;
+    font-size: 14px;
+    color: #94a3b8;
+    text-align: center;
+    max-width: 800px;
+    line-height: 1.5;
+  }
+  .highlight {
+    color: #f59e0b;
+    font-weight: bold;
+  }
 </style>
 </head>
 <body>
+
 <div id="wrap">
-  <canvas id="game" width="800" height="400"></canvas>
-  <canvas id="cam" width="200" height="150"></canvas>
+  <canvas id="game" width="800" height="450"></canvas>
+  <canvas id="cam" width="180" height="135"></canvas>
 </div>
-<div id="msg">カメラを許可し、上半身が映る位置に立ってください。腕を前後に振る＝走る / 両手を頭上へ＝ジャンプ / 下＝しゃがむ（キーボード: ←→連打で走る、スペースでジャンプ、↓でしゃがむ）<br><b style="color:#ffcc00">後ろからイノシシが追ってくる！スピードを落とすと追いつかれるぞ！</b></div>
+<div id="msg">
+  カメラを許可し、上半身が映る位置に立ってください。<br>
+  <b>操作方法:</b> 腕を前後に振る＝走る / 両手を頭上＝ジャンプ / 体をかがめる＝しゃがむ<br>
+  <span style="font-size:12px; color:#64748b;">(キーボード代替: ←/→連打で走る, スペースでジャンプ, ↓でしゃがむ)</span><br>
+  <span class="highlight">🐗 クォータービューの世界で後ろから襲い掛かるイノシシから逃げ切れ！</span>
+</div>
 <video id="vid" playsinline style="display:none"></video>
 
 <script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js"></script>
 <script>
-const cv=document.getElementById('game'),ctx=cv.getContext('2d');
-const cam=document.getElementById('cam'),cctx=cam.getContext('2d');
-const vid=document.getElementById('vid'),msg=document.getElementById('msg');
-const W=800,GY=320;
-const PLAYER_X = W / 2; // プレイヤーの画面中央X座標 (400)
+const cv = document.getElementById('game'), ctx = cv.getContext('2d');
+const cam = document.getElementById('cam'), cctx = cam.getContext('2d');
+const vid = document.getElementById('vid'), msg = document.getElementById('msg');
+const W = 800, H = 450;
 
-// ---- ゲーム状態 ----
-let arm=0, prevD=null, jumpReq=false, ducking=false, lastJump=0, camOK=false;
-let speed=0, dist=0, phase=0, best=0, state='ready';
-let py=0, vy=0, obs=[], nextObs=600, clouds=[{x:100,y:60},{x:400,y:100},{x:700,y:50}];
-let lives=3, invincibleTimer=0, hitFlash=0;
+// クォータービュー（アイソメトリック）座標変換パラメータ
+// 画面中心よりやや左下にカメラの基準点を設定
+const ORIGIN_X = 180;
+const ORIGIN_Y = 320;
+// 軸の角度（ラジアン）
+const COS_A = Math.cos(Math.PI / 6); // 30度
+const SIN_A = Math.sin(Math.PI / 6);
 
-// ---- イノシシの状態 ----
-let boarDist = 0; 
-let boarSpeed = 150; // イノシシの基本追走速度 (px/s)
-let boarAnimPhase = 0;
-
-function reset(){
-  speed=0; dist=0; py=0; vy=0; obs=[]; nextObs=600;
-  lives=3; invincibleTimer=0; hitFlash=0; state='run';
-  boarDist = -160; // プレイヤーより160px後ろからスタート
+/**
+ * 3Dワールド座標 (wx, wy, wz) を2Dスクリーン座標 (sx, sy) に変換
+ * wx: 進行方向（奧・右上方向）
+ * wy: 垂直方向（ジャンプ高さ）
+ * wz: 横幅・奥行き方向（左下～右上軸の直交方向）
+ */
+function toScreen(wx, wy, wz) {
+  const sx = ORIGIN_X + (wx * COS_A) - (wz * COS_A);
+  const sy = ORIGIN_Y - (wx * SIN_A) - (wz * SIN_A) - wy;
+  return { x: sx, y: sy };
 }
 
-// ---- MediaPipe Pose ----
-const pose=new Pose({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}`});
-pose.setOptions({modelComplexity:0,smoothLandmarks:true,minDetectionConfidence:0.5,minTrackingConfidence:0.5});
-pose.onResults(r=>{
-  cctx.clearRect(0,0,200,150);
-  cctx.drawImage(r.image,0,0,200,150);
-  const lm=r.poseLandmarks;
-  if(!lm){return;}
-  camOK=true;
-  const ls=lm[11],rs=lm[12],lw=lm[15],rw=lm[16],nose=lm[0];
-  [ls,rs,lw,rw,lm[13],lm[14]].forEach((p,i)=>{cctx.fillStyle=i>=2&&i<4?'#ff0':'#0f0';cctx.beginPath();cctx.arc(p.x*200,p.y*150,4,0,7);cctx.fill();});
+// ---- ゲーム状態変数 ----
+let arm = 0, prevD = null, jumpReq = false, ducking = false, lastJump = 0, camOK = false;
+let speed = 0, dist = 0, phase = 0, best = 0, state = 'ready';
+let py = 0, vy = 0, obs = [], nextObs = 400;
+let sideTrees = []; // 道沿いの木や装飾物
+let lives = 3, invincibleTimer = 0, hitFlash = 0;
+
+// ---- イノシシの状態 ----
+let boarDist = -160; 
+let boarSpeed = 150; 
+let boarAnimPhase = 0;
+
+// 初期化・リセット
+function reset() {
+  speed = 0; dist = 0; py = 0; vy = 0; obs = []; nextObs = 400;
+  lives = 3; invincibleTimer = 0; hitFlash = 0; state = 'run';
+  boarDist = -160;
   
-  const sw=Math.abs(ls.x-rs.x)||0.2;
-  const d=(lw.y-rw.y)/sw;
-  if(prevD!==null) arm=arm*0.7+Math.abs(d-prevD)*0.3;
-  prevD=d;
-
-  // ジャンプ判定：両手が肩より上
-  if(lw.y<ls.y-0.05&&rw.y<rs.y-0.05&&lw.visibility>0.5&&rw.visibility>0.5) jumpReq=true;
-
-  // しゃがみ判定：鼻の位置が肩の高さより下がり気味
-  const shoulderY=(ls.y+rs.y)/2;
-  if(nose.y > shoulderY - 0.02) {
-    ducking=true;
-  } else {
-    ducking=false;
+  // 道沿いの木を初期化
+  sideTrees = [];
+  for (let i = -500; i < 2000; i += 120) {
+    sideTrees.push({ x: i, side: Math.random() > 0.5 ? 1 : -1, type: Math.floor(Math.random() * 2) });
   }
+}
+
+const pose = new Pose({ locateFile: f => `https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}` });
+pose.setOptions({ modelComplexity: 0, smoothLandmarks: true, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+
+pose.onResults(r => {
+  cctx.clearRect(0, 0, 180, 135);
+  cctx.drawImage(r.image, 0, 0, 180, 135);
+  const lm = r.poseLandmarks;
+  if (!lm) return;
+  camOK = true;
+
+  const ls = lm[11], rs = lm[12], lw = lm[15], rw = lm[16], nose = lm[0];
+  [ls, rs, lw, rw, lm[13], lm[14]].forEach((p, i) => {
+    cctx.fillStyle = (i >= 2 && i < 4) ? '#f59e0b' : '#10b981';
+    cctx.beginPath(); cctx.arc(p.x * 180, p.y * 135, 3, 0, 7); cctx.fill();
+  });
+
+  const sw = Math.abs(ls.x - rs.x) || 0.2;
+  const d = (lw.y - rw.y) / sw;
+  if (prevD !== null) arm = arm * 0.7 + Math.abs(d - prevD) * 0.3;
+  prevD = d;
+
+  // ジャンプ判定: 両手が肩より上
+  if (lw.y < ls.y - 0.05 && rw.y < rs.y - 0.05 && lw.visibility > 0.5 && rw.visibility > 0.5) {
+    jumpReq = true;
+  }
+
+  // しゃがみ判定: 鼻の位置が肩の高さに近づく
+  const shoulderY = (ls.y + rs.y) / 2;
+  ducking = (nose.y > shoulderY - 0.02);
 });
 
-async function startCam(){
-  try{
-    const s=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
-    vid.srcObject=s; await vid.play();
-    (async function loop(){ if(!vid.paused){await pose.send({image:vid});} requestAnimationFrame(loop); })();
-  }catch(e){msg.textContent='カメラを使えません（キーボードで遊べます）: '+e.message;}
+async function startCam() {
+  try {
+    const s = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } });
+    vid.srcObject = s; await vid.play();
+    (async function loop() {
+      if (!vid.paused) { await pose.send({ image: vid }); }
+      requestAnimationFrame(loop);
+    })();
+  } catch (e) {
+    msg.innerHTML += `<br><span style="color:#ef4444">※ カメラを接続・許可できないためキーボードで操作できます</span>`;
+  }
 }
 startCam();
 
-// ---- キーボード代替 ----
-let lastKey='';
-addEventListener('keydown',e=>{
-  if(e.code==='Space'){jumpReq=true;e.preventDefault();}
-  if(e.code==='ArrowDown'){ducking=true;e.preventDefault();}
-  if(e.code==='ArrowLeft'||e.code==='ArrowRight'){if(e.code!==lastKey){arm=Math.min(0.3,arm+0.06);lastKey=e.code;}}
-  if(state!=='run'&&(e.code==='Space'||e.code==='Enter'))reset();
+let lastKey = '';
+addEventListener('keydown', e => {
+  if (e.code === 'Space') { jumpReq = true; e.preventDefault(); }
+  if (e.code === 'ArrowDown') { ducking = true; e.preventDefault(); }
+  if (e.code === 'ArrowLeft' || e.code === 'ArrowRight') {
+    if (e.code !== lastKey) { arm = Math.min(0.3, arm + 0.06); lastKey = e.code; }
+  }
+  if (state !== 'run' && (e.code === 'Space' || e.code === 'Enter')) reset();
 });
-addEventListener('keyup',e=>{
-  if(e.code==='ArrowDown'){ducking=false;}
+addEventListener('keyup', e => {
+  if (e.code === 'ArrowDown') ducking = false;
 });
-cv.addEventListener('click',()=>{if(state!=='run')reset();});
+cv.addEventListener('click', () => { if (state !== 'run') reset(); });
 
-// ---- 描画ユーティリティ ----
 function drawHeart(x, y, size, filled) {
   ctx.save();
   ctx.translate(x, y);
@@ -107,277 +195,518 @@ function drawHeart(x, y, size, filled) {
   ctx.bezierCurveTo(0, d * 3 / 4, d / 2, d / 2, d / 2, d / 4);
   ctx.bezierCurveTo(d / 2, 0, 0, 0, 0, d / 4);
   ctx.closePath();
-  ctx.fillStyle = filled ? '#ff3344' : 'rgba(255,255,255,0.3)';
+  ctx.fillStyle = filled ? '#ef4444' : 'rgba(255,255,255,0.2)';
   ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = '#fff';
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = '#ffffff';
   ctx.stroke();
   ctx.restore();
 }
 
-function drawChar(x, y, ph, air, isDuck){
-  ctx.strokeStyle='#222';ctx.lineWidth=5;ctx.lineCap='round';
-  const s=Math.sin(ph);
-  
-  if(isDuck) {
-    const hip=y-20, sh=y-42;
-    ctx.fillStyle='#ffcf99';ctx.beginPath();ctx.arc(x+5,y-50,11,0,7);ctx.fill();ctx.stroke();
-    ctx.beginPath();ctx.moveTo(x-10,sh);ctx.lineTo(x,hip);ctx.stroke();
-    const limb=(bx,by,ang,len)=>{ctx.beginPath();ctx.moveTo(bx,by);ctx.lineTo(bx+Math.sin(ang)*len,by+Math.cos(ang)*len);ctx.stroke();};
-    ctx.strokeStyle='#e33';limb(x-5,sh,1.0,20);limb(x-5,sh,-1.0,20);
-    ctx.strokeStyle='#33c';limb(x,hip,1.2,22);limb(x,hip,-0.5,22);
-  } else {
-    const hip=y-30,sh=y-62;
-    ctx.fillStyle='#ffcf99';ctx.beginPath();ctx.arc(x,y-78,12,0,7);ctx.fill();ctx.stroke();
-    ctx.beginPath();ctx.moveTo(x,sh);ctx.lineTo(x,hip);ctx.stroke();
-    const a=air?1.2:s*0.9;
-    const limb=(bx,by,ang,len)=>{ctx.beginPath();ctx.moveTo(bx,by);ctx.lineTo(bx+Math.sin(ang)*len,by+Math.cos(ang)*len);ctx.stroke();};
-    ctx.strokeStyle='#e33';limb(x,sh+4,a,26);limb(x,sh+4,-a,26);
-    ctx.strokeStyle='#33c';limb(x,hip,-a,30);limb(x,hip,a,30);
-  }
+/**
+ * 影の描画（クォータービューの地面に楕円を描画）
+ */
+function drawShadow(wx, wz, radiusX, radiusZ, alpha = 0.3) {
+  const p = toScreen(wx - dist, 0, wz);
+  ctx.save();
+  ctx.beginPath();
+  ctx.ellipse(p.x, p.y, radiusX, radiusZ * SIN_A, -Math.PI / 6, 0, Math.PI * 2);
+  ctx.fillStyle = `rgba(0,0,0,${alpha})`;
+  ctx.fill();
+  ctx.restore();
 }
 
-// ---- イノシシの描画関数 ----
-function drawBoar(x, y, ph) {
+function drawIsometricRunner(wx, wy, wz, ph, isAir, isDuck) {
+  const relX = wx - dist;
+  // 地面の影
+  const shadowAlpha = Math.max(0.1, 0.4 - wy / 300);
+  const shadowScale = Math.max(0.5, 1 - wy / 400);
+  drawShadow(wx, wz, 16 * shadowScale, 10 * shadowScale, shadowAlpha);
+
+  // スクリーン座標算出
+  const p = toScreen(relX, wy, wz);
+  const sx = p.x, sy = p.y;
+
   ctx.save();
-  ctx.translate(x, y);
-  
-  // 怒りマーク・湯気表現
-  ctx.fillStyle = '#ff3333';
-  ctx.font = 'bold 14px sans-serif';
-  ctx.fillText('💢', -10, -42 + Math.sin(ph*4)*3);
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
 
-  // 体（茶色い楕円ボディ）
-  ctx.fillStyle = '#8B4513';
-  ctx.beginPath();
-  ctx.ellipse(0, -18, 28, 18, 0, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = '#3a1700';
-  ctx.stroke();
+  const s = Math.sin(ph);
 
-  // 頭部・鼻先
-  ctx.fillStyle = '#a0522d';
-  ctx.beginPath();
-  ctx.arc(20, -22, 14, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.stroke();
+  if (isDuck) {
+    // しゃがみフォーム
+    const bodyH = 22;
+    // 胴体
+    ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 8;
+    ctx.beginPath(); ctx.moveTo(sx, sy - 8); ctx.lineTo(sx + 4, sy - bodyH); ctx.stroke();
+    // 頭
+    ctx.fillStyle = '#fde047'; ctx.beginPath(); ctx.arc(sx + 8, sy - bodyH - 8, 9, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#334155'; ctx.lineWidth = 2; ctx.stroke();
+    // 手足（コンパクトに折る）
+    ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.moveTo(sx + 2, sy - bodyH + 4); ctx.lineTo(sx + 12, sy - bodyH + 12); ctx.stroke();
+    ctx.strokeStyle = '#1d4ed8'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(sx, sy - 8); ctx.lineTo(sx - 10, sy); ctx.stroke();
+  } else {
+    // 通常走りフォーム
+    const legSwing = isAir ? 0.8 : s * 0.8;
+    const armSwing = isAir ? 0.8 : -s * 0.8;
 
-  // 鼻（円柱状の先端）
-  ctx.fillStyle = '#d2b48c';
+    // 後ろ脚
+    ctx.strokeStyle = '#1e40af'; ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 24);
+    ctx.lineTo(sx - Math.sin(legSwing) * 16, sy - 24 + Math.cos(legSwing) * 22);
+    ctx.stroke();
+
+    // 後ろ腕
+    ctx.strokeStyle = '#dc2626'; ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 44);
+    ctx.lineTo(sx - Math.sin(armSwing) * 14, sy - 44 + Math.cos(armSwing) * 16);
+    ctx.stroke();
+
+    // 胴体
+    ctx.strokeStyle = '#3b82f6'; ctx.lineWidth = 8;
+    ctx.beginPath(); ctx.moveTo(sx, sy - 20); ctx.lineTo(sx, sy - 48); ctx.stroke();
+
+    // 前脚
+    ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 24);
+    ctx.lineTo(sx + Math.sin(legSwing) * 16, sy - 24 + Math.cos(-legSwing) * 22);
+    ctx.stroke();
+
+    // 前腕
+    ctx.strokeStyle = '#ef4444'; ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.moveTo(sx, sy - 44);
+    ctx.lineTo(sx + Math.sin(armSwing) * 14, sy - 44 + Math.cos(-armSwing) * 16);
+    ctx.stroke();
+
+    // 頭部
+    ctx.fillStyle = '#ffedd5';
+    ctx.beginPath(); ctx.arc(sx + 2, sy - 58, 10, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#475569'; ctx.lineWidth = 2; ctx.stroke();
+
+    // ハチマキ/髪の毛演出
+    ctx.fillStyle = '#ef4444';
+    ctx.fillRect(sx - 8, sy - 64, 12, 4);
+  }
+
+  ctx.restore();
+}
+
+function drawIsometricBoar(wx, wz, ph) {
+  const relX = wx - dist;
+  drawShadow(wx, wz, 22, 12, 0.4);
+
+  const p = toScreen(relX, 0, wz);
+  const sx = p.x, sy = p.y;
+
+  ctx.save();
+
+  // 怒りマーク演出
+  ctx.fillStyle = '#ef4444';
+  ctx.font = 'bold 16px sans-serif';
+  ctx.fillText('💢', sx - 8, sy - 45 + Math.sin(ph * 4) * 3);
+
+  const legOffset = Math.sin(ph * 10) * 10;
+
+  // 脚 (クォータービュー風に4本表現)
+  ctx.strokeStyle = '#451a03'; ctx.lineWidth = 4; ctx.lineCap = 'round';
+  // 左後ろ/右後ろ脚
+  ctx.beginPath(); ctx.moveTo(sx - 12, sy - 10); ctx.lineTo(sx - 12 - legOffset, sy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(sx + 8, sy - 10); ctx.lineTo(sx + 8 + legOffset, sy); ctx.stroke();
+
+  // 胴体 (ブロック状の立体楕円)
+  ctx.fillStyle = '#78350f';
   ctx.beginPath();
-  ctx.ellipse(28, -20, 6, 4, 0, 0, Math.PI * 2);
+  ctx.ellipse(sx, sy - 22, 26, 18, -Math.PI / 12, 0, Math.PI * 2);
   ctx.fill();
-  ctx.stroke();
-  // 鼻の穴
-  ctx.fillStyle = '#000';
-  ctx.fillRect(27, -21, 2, 2);
+  ctx.strokeStyle = '#451a03'; ctx.lineWidth = 2.5; ctx.stroke();
+
+  // 背中のたてがみ
+  ctx.fillStyle = '#451a03';
+  ctx.beginPath();
+  ctx.moveTo(sx - 20, sy - 30); ctx.lineTo(sx + 5, sy - 38); ctx.lineTo(sx + 10, sy - 26);
+  ctx.fill();
+
+  // 前脚
+  ctx.strokeStyle = '#78350f';
+  ctx.beginPath(); ctx.moveTo(sx - 6, sy - 10); ctx.lineTo(sx - 6 + legOffset, sy); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(sx + 14, sy - 10); ctx.lineTo(sx + 14 - legOffset, sy); ctx.stroke();
+
+  // 頭部（立体斜め向き）
+  ctx.fillStyle = '#92400e';
+  ctx.beginPath();
+  ctx.ellipse(sx + 18, sy - 20, 13, 11, Math.PI / 6, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
+
+  // 鼻先
+  ctx.fillStyle = '#fde68a';
+  ctx.beginPath();
+  ctx.ellipse(sx + 27, sy - 16, 5, 4, Math.PI / 6, 0, Math.PI * 2);
+  ctx.fill(); ctx.stroke();
 
   // 牙
-  ctx.fillStyle = '#fff';
+  ctx.fillStyle = '#ffffff';
   ctx.beginPath();
-  ctx.moveTo(22, -12);
-  ctx.lineTo(18, -8);
-  ctx.lineTo(25, -10);
-  ctx.closePath();
-  ctx.fill();
-  ctx.stroke();
+  ctx.moveTo(sx + 22, sy - 12); ctx.lineTo(sx + 28, sy - 7); ctx.lineTo(sx + 20, sy - 8);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
 
-  // 目（怒り目つき）
-  ctx.fillStyle = '#ffcc00';
-  ctx.beginPath();
-  ctx.arc(22, -26, 3, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.fillStyle = '#000';
-  ctx.fillRect(21, -27, 2, 2);
-
-  // 足（走るアニメーション用）
-  const legSwing = Math.sin(ph * 10) * 8;
-  ctx.strokeStyle = '#5c2c16';
-  ctx.lineWidth = 4;
-  ctx.lineCap = 'round';
-  
-  // 前足
-  ctx.beginPath();
-  ctx.moveTo(12, 0);
-  ctx.lineTo(12 + legSwing, 12);
-  ctx.stroke();
-  
-  // 後ろ足
-  ctx.beginPath();
-  ctx.moveTo(-12, 0);
-  ctx.lineTo(-12 - legSwing, 12);
-  ctx.stroke();
+  // 目
+  ctx.fillStyle = '#f59e0b';
+  ctx.beginPath(); ctx.arc(sx + 18, sy - 24, 3, 0, Math.PI * 2); ctx.fill();
+  ctx.fillStyle = '#000000'; ctx.fillRect(sx + 18, sy - 25, 2, 2);
 
   ctx.restore();
 }
 
-function draw(){
-  ctx.fillStyle='#8fd3ff';ctx.fillRect(0,0,W,400);
+function drawIsometricObstacle(o) {
+  const relX = o.x - dist;
+  const p = toScreen(relX, 0, 0);
 
-  // 雲（遠景：ゆっくり動く）
-  ctx.fillStyle='#fff';
-  clouds.forEach(c=>{ctx.beginPath();ctx.arc(c.x,c.y,18,0,7);ctx.arc(c.x+20,c.y+4,14,0,7);ctx.arc(c.x-20,c.y+4,14,0,7);ctx.fill();});
-  
-  // 地面
-  ctx.fillStyle='#5b3';ctx.fillRect(0,GY,W,80);
-  ctx.fillStyle='#4a2';for(let i=0;i<20;i++){const x=((i*60-dist)%1200+1200)%1200-60;ctx.fillRect(x,GY+20,30,6);}
-  
-  // 障害物の描画
-  obs.forEach(o=>{
-    ctx.fillStyle=o.type==='high'?'#8844aa':'#666';
-    let oy = o.type==='high' ? GY - o.h - 45 : GY - o.h;
-    ctx.fillRect(o.x-dist, oy, o.w, o.h);
+  ctx.save();
+
+  if (o.type === 'high') {
+    // ハイタイプ（頭上障害物: くぐり抜けるゲート・バー）
+    const h = 55;
+    const w = o.w;
+    const p1 = toScreen(relX, 0, -20);
+    const p2 = toScreen(relX, 0, 20);
+    const p1Top = toScreen(relX, h, -20);
+    const p2Top = toScreen(relX, h, 20);
+
+    // 柱の影
+    drawShadow(o.x, -20, 8, 5, 0.3);
+    drawShadow(o.x, 20, 8, 5, 0.3);
+
+    // 左右の柱
+    ctx.strokeStyle = '#64748b'; ctx.lineWidth = 6;
+    ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p1Top.x, p1Top.y); ctx.stroke();
+    ctx.beginPath(); ctx.moveTo(p2.x, p2.y); ctx.lineTo(p2Top.x, p2Top.y); ctx.stroke();
+
+    // バー（警戒トラ模様）
+    ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 10;
+    ctx.beginPath(); ctx.moveTo(p1Top.x, p1Top.y); ctx.lineTo(p2Top.x, p2Top.y); ctx.stroke();
+
+    ctx.strokeStyle = '#000000'; ctx.lineWidth = 10; ctx.setLineDash([8, 8]);
+    ctx.beginPath(); ctx.moveTo(p1Top.x, p1Top.y); ctx.lineTo(p2Top.x, p2Top.y); ctx.stroke();
+
+  } else {
+    // ノーマルタイプ（ジャンプで飛び越える岩・ハードル）
+    drawShadow(o.x, 0, o.w * 0.8, o.h * 0.5, 0.4);
+
+    const baseP = toScreen(relX, 0, 0);
+    const topP = toScreen(relX, o.h, 0);
+    const dx = o.w * COS_A * 0.5;
+    const dy = o.w * SIN_A * 0.5;
+
+    // 3Dバウンディングブロック（立体的な岩/箱）
+    // 上面
+    ctx.fillStyle = '#a8a29e';
+    ctx.beginPath();
+    ctx.moveTo(topP.x, topP.y - o.h * 0.3);
+    ctx.lineTo(topP.x + dx, topP.y - o.h * 0.3 + dy);
+    ctx.lineTo(topP.x, topP.y - o.h * 0.3 + dy * 2);
+    ctx.lineTo(topP.x - dx, topP.y - o.h * 0.3 + dy);
+    ctx.closePath(); ctx.fill();
+
+    // 前側面
+    ctx.fillStyle = '#78716c';
+    ctx.beginPath();
+    ctx.moveTo(topP.x - dx, topP.y - o.h * 0.3 + dy);
+    ctx.lineTo(topP.x, topP.y - o.h * 0.3 + dy * 2);
+    ctx.lineTo(baseP.x, baseP.y + dy * 2);
+    ctx.lineTo(baseP.x - dx, baseP.y + dy);
+    ctx.closePath(); ctx.fill();
+
+    // 右側面
+    ctx.fillStyle = '#57534e';
+    ctx.beginPath();
+    ctx.moveTo(topP.x, topP.y - o.h * 0.3 + dy * 2);
+    ctx.lineTo(topP.x + dx, topP.y - o.h * 0.3 + dy);
+    ctx.lineTo(baseP.x + dx, baseP.y + dy);
+    ctx.lineTo(baseP.x, baseP.y + dy * 2);
+    ctx.closePath(); ctx.fill();
+  }
+
+  ctx.restore();
+}
+
+function drawWorld() {
+  // 1. 背景のグラデーション sky
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, '#0f172a');
+  grad.addColorStop(0.6, '#1e293b');
+  grad.addColorStop(1, '#0284c7');
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+
+  // 遠景の山脈（クォータービューの地平線に合わせた斜めライン風）
+  ctx.fillStyle = '#1e3a8a';
+  ctx.beginPath();
+  ctx.moveTo(0, 180);
+  ctx.lineTo(W, 80);
+  ctx.lineTo(W, H);
+  ctx.lineTo(0, H);
+  ctx.fill();
+
+  // 2. 草原の地面（大地のベース）
+  ctx.fillStyle = '#15803d';
+  ctx.beginPath();
+  const p1 = toScreen(-1000, 0, -300);
+  const p2 = toScreen(3000, 0, -300);
+  const p3 = toScreen(3000, 0, 300);
+  const p4 = toScreen(-1000, 0, 300);
+  ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.lineTo(p3.x, p3.y); ctx.lineTo(p4.x, p4.y);
+  ctx.fill();
+
+  // 3. 走るコース（トラック・道）
+  const roadWidth = 50; // トラック幅 Z方向[- roadWidth, + roadWidth]
+  const r1 = toScreen(-500 - dist, 0, -roadWidth);
+  const r2 = toScreen(2000 - dist, 0, -roadWidth);
+  const r3 = toScreen(2000 - dist, 0, roadWidth);
+  const r4 = toScreen(-500 - dist, 0, roadWidth);
+
+  ctx.fillStyle = '#d97706'; // トラックの土色/アンツーカ
+  ctx.beginPath();
+  ctx.moveTo(r1.x, r1.y); ctx.lineTo(r2.x, r2.y); ctx.lineTo(r3.x, r3.y); ctx.lineTo(r4.x, r4.y);
+  ctx.fill();
+
+  // 道のフチ・立体境界
+  ctx.strokeStyle = '#b45309'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(r1.x, r1.y); ctx.lineTo(r2.x, r2.y); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(r4.x, r4.y); ctx.lineTo(r3.x, r3.y); ctx.stroke();
+
+  // グリッド線・ライン（進む距離感の強調）
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)'; ctx.lineWidth = 2;
+  const startX = Math.floor((dist - 500) / 80) * 80;
+  for (let x = startX; x < dist + 1500; x += 80) {
+    const lineP1 = toScreen(x - dist, 0, -roadWidth);
+    const lineP2 = toScreen(x - dist, 0, roadWidth);
+    ctx.beginPath(); ctx.moveTo(lineP1.x, lineP1.y); ctx.lineTo(lineP2.x, lineP2.y); ctx.stroke();
+  }
+
+  // 中央白線
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)'; ctx.lineWidth = 3;
+  ctx.setLineDash([20, 20]);
+  const centerP1 = toScreen(-500 - dist, 0, 0);
+  const centerP2 = toScreen(2000 - dist, 0, 0);
+  ctx.beginPath(); ctx.moveTo(centerP1.x, centerP1.y); ctx.lineTo(centerP2.x, centerP2.y); ctx.stroke();
+  ctx.setLineDash([]); // リセット
+
+  // 4. 道沿いの樹木・オブジェクト（奥行き感を高める表現）
+  sideTrees.forEach(t => {
+    const rx = t.x - dist;
+    if (rx > -400 && rx < 1200) {
+      const wz = t.side * (roadWidth + 35);
+      drawShadow(t.x, wz, 14, 8, 0.3);
+      const tp = toScreen(rx, 0, wz);
+
+      // 樹木の描画
+      ctx.fillStyle = '#78350f';
+      ctx.fillRect(tp.x - 3, tp.y - 25, 6, 25); // 幹
+
+      ctx.fillStyle = t.type === 0 ? '#166534' : '#15803d';
+      ctx.beginPath();
+      ctx.arc(tp.x, tp.y - 35, 18, 0, Math.PI * 2);
+      ctx.fill();
+    }
   });
 
-  // ---- イノシシの描画 (中央のプレイヤー位置基準の相対位置) ----
-  const boarScreenX = PLAYER_X + (boarDist - dist);
-  if(boarScreenX > -50 && boarScreenX < W + 50) {
-    drawBoar(boarScreenX, GY, boarAnimPhase);
+  // イノシシと木・障害物・プレイヤーの描画順をソート（クォータービューの奥から手前へ描画）
+  const renderList = [];
+
+  // イノシシ
+  renderList.push({ type: 'boar', x: boarDist, z: 0 });
+  // プレイヤー
+  renderList.push({ type: 'player', x: dist + 150, z: 0 });
+  // 障害物
+  obs.forEach(o => renderList.push({ type: 'obs', x: o.x, z: 0, data: o }));
+
+  // X軸の奥（小さい値）から手前（大きい値）へソート
+  renderList.sort((a, b) => a.x - b.x);
+
+  // 描画実行
+  renderList.forEach(item => {
+    if (item.type === 'boar') {
+      drawIsometricBoar(boarDist, item.z, boarAnimPhase);
+    } else if (item.type === 'player') {
+      if (invincibleTimer <= 0 || Math.floor(invincibleTimer * 10) % 2 === 0) {
+        drawIsometricRunner(dist + 150, py, item.z, phase, py > 0, ducking);
+      }
+    } else if (item.type === 'obs') {
+      drawIsometricObstacle(item.data);
+    }
+  });
+}
+
+function drawUI() {
+  // 左上: ライフ（ハート）
+  for (let i = 0; i < 3; i++) {
+    drawHeart(28 + i * 32, 28, 22, i < lives);
   }
 
-  // 主人公の描画（画面中央 PLAYER_X = 400 に配置 / 無敵中は点滅）
-  if(invincibleTimer<=0 || Math.floor(invincibleTimer*10)%2===0){
-    drawChar(PLAYER_X,GY-py,phase,py>0,ducking);
-  }
+  // 距離スコア
+  ctx.fillStyle = '#ffffff'; ctx.font = 'bold 16px sans-serif';
+  ctx.shadowColor = 'rgba(0,0,0,0.5)'; ctx.shadowBlur = 4;
+  ctx.fillText(`走破距離: ${Math.floor(dist / 20)} m   (最高: ${best} m)`, 130, 34);
 
-  // ---- UI: 左上のハート ----
-  for(let i=0; i<3; i++){
-    drawHeart(20 + i*30, 20, 24, i < lives);
-  }
+  // 腕振りパワーメーター
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
+  ctx.beginPath(); ctx.roundRect(130, 44, 160, 14, 7); ctx.fill();
+  const powerRatio = Math.min(1, arm * 7);
+  ctx.fillStyle = powerRatio > 0.8 ? '#ef4444' : powerRatio > 0.4 ? '#f59e0b' : '#38bdf8';
+  ctx.beginPath(); ctx.roundRect(132, 46, Math.max(0, 156 * powerRatio), 10, 5); ctx.fill();
+  ctx.fillStyle = '#ffffff'; ctx.font = '9px sans-serif';
+  ctx.fillText('POWER', 136, 54);
 
-  // スコアなどのテキスト
-  ctx.fillStyle='#000';ctx.font='bold 16px sans-serif';
-  ctx.fillText(`距離 ${Math.floor(dist/20)} m   ベスト ${best} m`,115,32);
-
-  // ---- UI: リアルタイム腕振りパワーメーター（タコメーター風） ----
-  ctx.fillStyle='rgba(0,0,0,0.3)';
-  ctx.fillRect(115, 42, 160, 14);
-  const powerRatio = Math.min(1, arm*7);
-  ctx.fillStyle = powerRatio > 0.8 ? '#ff3344' : powerRatio > 0.4 ? '#ffaa00' : '#33ccff';
-  ctx.fillRect(117, 44, 156 * powerRatio, 10);
-  ctx.fillStyle='#000';ctx.font='bold 10px sans-serif';
-  ctx.fillText('ARM POWER', 122, 52);
-
-  // ---- 距離感メーター（イノシシとの距離ゲージ） ----
-  ctx.fillStyle='rgba(0,0,0,0.3)';
-  ctx.fillRect(W - 210, 15, 190, 16);
-  // 差分距離 (dist - boarDist) は大きいほど安全、0に近づくと追いつかれる
-  const diffDist = dist - boarDist;
-  const maxDiff = 250; // 最大ゲージ幅の基準差分
-  const ratio = Math.max(0, Math.min(1, diffDist / maxDiff));
+  // イノシシ接近危険度メーター (画面右上)
+  ctx.fillStyle = 'rgba(15, 23, 42, 0.7)';
+  ctx.beginPath(); ctx.roundRect(W - 220, 16, 200, 22, 11); ctx.fill();
   
-  ctx.fillStyle = ratio < 0.3 ? '#ff2222' : ratio < 0.6 ? '#ffaa00' : '#33cc33';
-  ctx.fillRect(W - 208, 17, 186 * ratio, 12);
-  ctx.fillStyle='#fff';ctx.font='bold 10px sans-serif';
-  ctx.textAlign='center';
-  ctx.fillText(diffDist < 30 ? '⚠️すぐ後ろ！' : '🐗 イノシシとの距離', W - 115, 27);
-  ctx.textAlign='left';
+  const diffDist = (dist + 150) - boarDist;
+  const maxDiff = 250;
+  const ratio = Math.max(0, Math.min(1, diffDist / maxDiff));
+
+  ctx.fillStyle = ratio < 0.3 ? '#ef4444' : ratio < 0.6 ? '#f59e0b' : '#22c55e';
+  ctx.beginPath(); ctx.roundRect(W - 217, 19, Math.max(0, 194 * ratio), 16, 8); ctx.fill();
+  ctx.fillStyle = '#ffffff'; ctx.font = 'bold 11px sans-serif';
+  ctx.textAlign = 'center';
+  ctx.fillText(diffDist < 50 ? '⚠️ 追いつかれる！' : '🐗 イノシシとの距離', W - 120, 31);
+  ctx.textAlign = 'left';
+  ctx.shadowBlur = 0; // リセット
 
   // 被弾時の画面赤フラッシュ演出
-  if(hitFlash > 0){
-    ctx.fillStyle=`rgba(255, 0, 0, ${hitFlash})`;
-    ctx.fillRect(0, 0, W, 400);
+  if (hitFlash > 0) {
+    ctx.fillStyle = `rgba(239, 68, 68, ${hitFlash})`;
+    ctx.fillRect(0, 0, W, H);
   }
 
-  if(state!=='run'){
-    ctx.fillStyle='rgba(0,0,0,.55)';ctx.fillRect(0,120,W,140);
-    ctx.fillStyle='#fff';ctx.textAlign='center';ctx.font='bold 30px sans-serif';
-    ctx.fillText(state==='ready'?'腕を振って走れ！':'GAME OVER',W/2,175);
-    ctx.font='18px sans-serif';
-    ctx.fillText(camOK||state==='over'?'クリック / スペースでスタート':'カメラ準備中… クリック / スペースでスタート',W/2,215);
-    ctx.textAlign='left';
+  // オーバーレイ表示（スタート/ゲームオーバー）
+  if (state !== 'run') {
+    ctx.fillStyle = 'rgba(15, 23, 42, 0.75)';
+    ctx.fillRect(0, 0, W, H);
+
+    ctx.fillStyle = '#ffffff'; ctx.textAlign = 'center'; ctx.font = 'bold 32px sans-serif';
+    ctx.fillText(state === 'ready' ? '腕を振りまくって逃げ切れ！' : 'GAME OVER', W / 2, H / 2 - 20);
+
+    ctx.font = '16px sans-serif'; ctx.fillStyle = '#cbd5e1';
+    const subText = camOK || state === 'over' ? '画面クリック または スペースキーでスタート' : 'カメラ準備中...（クリックで開始）';
+    ctx.fillText(subText, W / 2, H / 2 + 25);
+    ctx.textAlign = 'left';
   }
 }
 
-// ---- メインループ ----
-let last=performance.now();
-function tick(t){
-  const dt=Math.min(0.05,(t-last)/1000);last=t;
-  
-  // 慣性：腕を振らないと徐々に減速
-  arm*=Math.pow(0.5,dt*2);
-  if(hitFlash > 0) hitFlash -= dt * 2;
-  
-  if(state==='run'){
-    if(invincibleTimer>0) invincibleTimer-=dt;
+let last = performance.now();
 
-    const target=Math.min(1,arm*7)*420;
-    speed+=(target-speed)*Math.min(1,dt*5); // スムーズな加速・減速
-    dist+=speed*dt;
-    phase+=speed*dt*0.05+dt*2*(speed>5?1:0);
+function tick(t) {
+  const dt = Math.min(0.05, (t - last) / 1000);
+  last = t;
 
-    // ---- イノシシの追走ロジック ----
-    boarSpeed = 160; // 基本の追走速度
+  // 慣性（腕を振らないと減速）
+  arm *= Math.pow(0.5, dt * 2);
+  if (hitFlash > 0) hitFlash -= dt * 2;
+
+  if (state === 'run') {
+    if (invincibleTimer > 0) invincibleTimer -= dt;
+
+    // スピード計算
+    const targetSpeed = Math.min(1, arm * 7) * 440;
+    speed += (targetSpeed - speed) * Math.min(1, dt * 5);
+    dist += speed * dt;
+    phase += speed * dt * 0.05 + dt * 2 * (speed > 5 ? 1 : 0);
+
+    // イノシシの追走計算
+    boarSpeed = 165; // イノシシの基本速度
     boarDist += boarSpeed * dt;
 
-    // イノシシとプレイヤーの距離が縮まって追いついた場合の処理 (差が15px未満)
-    if((dist - boarDist) < 15) {
-      if(invincibleTimer <= 0) {
+    // イノシシとの衝突チェック (プレイヤー位置: dist + 150)
+    const playerX = dist + 150;
+    if ((playerX - boarDist) < 20) {
+      if (invincibleTimer <= 0) {
         lives--;
         invincibleTimer = 1.5;
-        hitFlash = 0.6;
-        boarDist = dist - 120;
-        if(lives <= 0){
+        hitFlash = 0.5;
+        boarDist = playerX - 120; // ペナルティ後に押し戻す
+        if (lives <= 0) {
           state = 'over';
-          best = Math.max(best, Math.floor(dist/20));
+          best = Math.max(best, Math.floor(dist / 20));
         }
       }
     }
 
-    // 逆にイノシシがプレイヤーから離れすぎないように制限
-    if((dist - boarDist) > 300) {
-      boarDist = dist - 300;
+    // 離れすぎ防止（画面外へ消えすぎないゴムバンド効果）
+    if ((playerX - boarDist) > 320) {
+      boarDist = playerX - 320;
+    }
+    boarAnimPhase += dt * (boarSpeed / 25);
+
+    // ジャンプ処理
+    if (jumpReq && py === 0 && t - lastJump > 350) {
+      vy = 600;
+      lastJump = t;
+    }
+    jumpReq = false;
+
+    if (py > 0 || vy > 0) {
+      py += vy * dt;
+      vy -= 1700 * dt;
+      if (py <= 0) { py = 0; vy = 0; }
     }
 
-    boarAnimPhase += dt * (boarSpeed / 30);
-
-    if(jumpReq&&py===0&&t-lastJump>400){vy=620;lastJump=t;}
-    jumpReq=false;
-
-    if(py>0||vy>0){py+=vy*dt;vy-=1800*dt;if(py<=0){py=0;vy=0;}}
-
-    // 障害物の生成
-    if(dist+W>nextObs){
-      const isHigh=Math.random()<0.35;
+    // 障害物の生成（ワールド進行に応じて）
+    if (dist + 900 > nextObs) {
+      const isHigh = Math.random() < 0.35;
       obs.push({
-        x:nextObs,
-        w:26+Math.random()*15,
-        h:isHigh?24:(30+Math.random()*30),
-        type:isHigh?'high':'normal'
+        x: nextObs,
+        w: 30 + Math.random() * 15,
+        h: isHigh ? 28 : (30 + Math.random() * 25),
+        type: isHigh ? 'high' : 'normal'
       });
-      nextObs+=450+Math.random()*350;
+      nextObs += 420 + Math.random() * 320;
     }
-    obs=obs.filter(o=>o.x-dist>-200);
+    obs = obs.filter(o => o.x - dist > -200);
 
-    // 障害物の衝突判定 (中央 PLAYER_X = 400 付近での判定)
-    for(const o of obs){
-      const ox=o.x-dist;
-      if(ox < PLAYER_X + 15 && ox + o.w > PLAYER_X - 15){
-        let hit=false;
-        if(o.type==='high'){
-          if(!ducking && py<20) hit=true;
+    // 障害物衝突判定
+    for (const o of obs) {
+      const ox = o.x - playerX;
+      if (ox < 20 && ox + o.w > -10) {
+        let hit = false;
+        if (o.type === 'high') {
+          // 頭上障害物: しゃがんでいなければ衝突（高さチェック）
+          if (!ducking && py < 25) hit = true;
         } else {
-          if(py < o.h-4) hit=true;
+          // 通常障害物: ジャンプでかわす
+          if (py < o.h - 4) hit = true;
         }
 
-        if(hit && invincibleTimer<=0){
+        if (hit && invincibleTimer <= 0) {
           lives--;
-          invincibleTimer=1.5;
-          hitFlash=0.6;
-          boarDist += 40; 
-          if(lives<=0){
-            state='over';
-            best=Math.max(best,Math.floor(dist/20));
+          invincibleTimer = 1.5;
+          hitFlash = 0.6;
+          boarDist += 50; // スピードダウンによりイノシシ急接近
+          if (lives <= 0) {
+            state = 'over';
+            best = Math.max(best, Math.floor(dist / 20));
           }
         }
       }
     }
-    clouds.forEach(c=>{c.x-=speed*dt*0.1;if(c.x<-40)c.x=W+40;});
   }
-  jumpReq=false;
-  draw();requestAnimationFrame(tick);
+
+  jumpReq = false;
+
+  // 描画実行
+  drawWorld();
+  drawUI();
+
+  requestAnimationFrame(tick);
 }
+
+// ゲームループの開始
 requestAnimationFrame(tick);
 </script>
 </body>
