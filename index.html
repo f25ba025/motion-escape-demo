@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>腕振りランナー - イノシシ追走版</title>
+<style>
+body{margin:0;background:#111;color:#fff;font-family:sans-serif;display:flex;flex-direction:column;align-items:center}
+#wrap{position:relative;margin-top:10px}
+#game{background:#8fd3ff;border-radius:8px;max-width:96vw}
+#cam{position:absolute;right:8px;top:8px;width:200px;height:150px;border:2px solid #fff;border-radius:6px;transform:scaleX(-1);background:#000}
+#msg{margin:8px;font-size:14px;color:#ccc;text-align:center}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <canvas id="game" width="800" height="400"></canvas>
+  <canvas id="cam" width="200" height="150"></canvas>
+</div>
+<div id="msg">カメラを許可し、上半身が映る位置に立ってください。腕を前後に振る＝走る / 両手を頭上へ＝ジャンプ / 下＝しゃがむ（キーボード: ←→連打で走る、スペースでジャンプ、↓でしゃがむ）<br><b style="color:#ffcc00">後ろからイノシシが追ってくる！スピードを落とすと追いつかれるぞ！</b></div>
+<video id="vid" playsinline style="display:none"></video>
+
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/pose.js"></script>
+<script>
+const cv=document.getElementById('game'),ctx=cv.getContext('2d');
+const cam=document.getElementById('cam'),cctx=cam.getContext('2d');
+const vid=document.getElementById('vid'),msg=document.getElementById('msg');
+const W=800,GY=320;
+const PLAYER_X = W / 2; // プレイヤーの画面中央X座標 (400)
+
+// ---- ゲーム状態 ----
+let arm=0, prevD=null, jumpReq=false, ducking=false, lastJump=0, camOK=false;
+let speed=0, dist=0, phase=0, best=0, state='ready';
+let py=0, vy=0, obs=[], nextObs=600, clouds=[{x:100,y:60},{x:400,y:100},{x:700,y:50}];
+let lives=3, invincibleTimer=0, hitFlash=0;
+
+// ---- イノシシの状態 ----
+let boarDist = 0; 
+let boarSpeed = 150; // イノシシの基本追走速度 (px/s)
+let boarAnimPhase = 0;
+
+function reset(){
+  speed=0; dist=0; py=0; vy=0; obs=[]; nextObs=600;
+  lives=3; invincibleTimer=0; hitFlash=0; state='run';
+  boarDist = -160; // プレイヤーより160px後ろからスタート
+}
+
+// ---- MediaPipe Pose ----
+const pose=new Pose({locateFile:f=>`https://cdn.jsdelivr.net/npm/@mediapipe/pose@0.5.1675469404/${f}`});
+pose.setOptions({modelComplexity:0,smoothLandmarks:true,minDetectionConfidence:0.5,minTrackingConfidence:0.5});
+pose.onResults(r=>{
+  cctx.clearRect(0,0,200,150);
+  cctx.drawImage(r.image,0,0,200,150);
+  const lm=r.poseLandmarks;
+  if(!lm){return;}
+  camOK=true;
+  const ls=lm[11],rs=lm[12],lw=lm[15],rw=lm[16],nose=lm[0];
+  [ls,rs,lw,rw,lm[13],lm[14]].forEach((p,i)=>{cctx.fillStyle=i>=2&&i<4?'#ff0':'#0f0';cctx.beginPath();cctx.arc(p.x*200,p.y*150,4,0,7);cctx.fill();});
+  
+  const sw=Math.abs(ls.x-rs.x)||0.2;
+  const d=(lw.y-rw.y)/sw;
+  if(prevD!==null) arm=arm*0.7+Math.abs(d-prevD)*0.3;
+  prevD=d;
+
+  // ジャンプ判定：両手が肩より上
+  if(lw.y<ls.y-0.05&&rw.y<rs.y-0.05&&lw.visibility>0.5&&rw.visibility>0.5) jumpReq=true;
+
+  // しゃがみ判定：鼻の位置が肩の高さより下がり気味
+  const shoulderY=(ls.y+rs.y)/2;
+  if(nose.y > shoulderY - 0.02) {
+    ducking=true;
+  } else {
+    ducking=false;
+  }
+});
+
+async function startCam(){
+  try{
+    const s=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480}});
+    vid.srcObject=s; await vid.play();
+    (async function loop(){ if(!vid.paused){await pose.send({image:vid});} requestAnimationFrame(loop); })();
+  }catch(e){msg.textContent='カメラを使えません（キーボードで遊べます）: '+e.message;}
+}
+startCam();
+
+// ---- キーボード代替 ----
+let lastKey='';
+addEventListener('keydown',e=>{
+  if(e.code==='Space'){jumpReq=true;e.preventDefault();}
+  if(e.code==='ArrowDown'){ducking=true;e.preventDefault();}
+  if(e.code==='ArrowLeft'||e.code==='ArrowRight'){if(e.code!==lastKey){arm=Math.min(0.3,arm+0.06);lastKey=e.code;}}
+  if(state!=='run'&&(e.code==='Space'||e.code==='Enter'))reset();
+});
+addEventListener('keyup',e=>{
+  if(e.code==='ArrowDown'){ducking=false;}
+});
+cv.addEventListener('click',()=>{if(state!=='run')reset();});
+
+// ---- 描画ユーティリティ ----
+function drawHeart(x, y, size, filled) {
+  ctx.save();
+  ctx.translate(x, y);
+  ctx.beginPath();
+  let d = size;
+  ctx.moveTo(0, d / 4);
+  ctx.bezierCurveTo(0, 0, -d / 2, 0, -d / 2, d / 4);
+  ctx.bezierCurveTo(-d / 2, d / 2, 0, d * 3 / 4, 0, d);
+  ctx.bezierCurveTo(0, d * 3 / 4, d / 2, d / 2, d / 2, d / 4);
+  ctx.bezierCurveTo(d / 2, 0, 0, 0, 0, d / 4);
+  ctx.closePath();
+  ctx.fillStyle = filled ? '#ff3344' : 'rgba(255,255,255,0.3)';
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#fff';
+  ctx.stroke();
+  ctx.restore();
+}
+
+function drawChar(x, y, ph, air, isDuck){
+  ctx.strokeStyle='#222';ctx.lineWidth=5;ctx.lineCap='round';
+  const s=Math.sin(ph);
+  
+  if(isDuck) {
+    const hip=y-20, sh=y-42;
+    ctx.fillStyle='#ffcf99';ctx.beginPath();ctx.arc(x+5,y-50,11,0,7);ctx.fill();ctx.stroke();
+    ctx.beginPath();ctx.moveTo(x-10,sh);ctx.lineTo(x,hip);ctx.stroke();
+    const limb=(bx,by,ang,len)=>{ctx.beginPath();ctx.moveTo(bx,by);ctx.lineTo(bx+Math.sin(ang)*len,by+Math.cos(ang)*len);ctx.stroke();};
+    ctx.strokeStyle='#e33';limb(x-5,sh,1.0,20);limb(x-5,sh,-1.0,20);
+    ctx.strokeStyle='#33c';limb(x,hip,1.2,22);limb(x,hip,-0.5,22);
+  } else {
+    const hip=y-30,sh=y-62;
+    ctx.fillStyle='#ffcf99';ctx.beginPath();ctx.arc(x,y-78,12,0,7);ctx.fill();ctx.stroke();
+    ctx.beginPath();ctx.moveTo(x,sh);ctx.lineTo(x,hip);ctx.stroke();
+    const a=air?1.2:s*0.9;
+    const limb=(bx,by,ang,len)=>{ctx.beginPath();ctx.moveTo(bx,by);ctx.lineTo(bx+Math.sin(ang)*len,by+Math.cos(ang)*len);ctx.stroke();};
+    ctx.strokeStyle='#e33';limb(x,sh+4,a,26);limb(x,sh+4,-a,26);
+    ctx.strokeStyle='#33c';limb(x,hip,-a,30);limb(x,hip,a,30);
+  }
+}
+
+// ---- イノシシの描画関数 ----
+function drawBoar(x, y, ph) {
+  ctx.save();
+  ctx.translate(x, y);
+  
+  // 怒りマーク・湯気表現
+  ctx.fillStyle = '#ff3333';
+  ctx.font = 'bold 14px sans-serif';
+  ctx.fillText('💢', -10, -42 + Math.sin(ph*4)*3);
+
+  // 体（茶色い楕円ボディ）
+  ctx.fillStyle = '#8B4513';
+  ctx.beginPath();
+  ctx.ellipse(0, -18, 28, 18, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.lineWidth = 2;
+  ctx.strokeStyle = '#3a1700';
+  ctx.stroke();
+
+  // 頭部・鼻先
+  ctx.fillStyle = '#a0522d';
+  ctx.beginPath();
+  ctx.arc(20, -22, 14, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+
+  // 鼻（円柱状の先端）
+  ctx.fillStyle = '#d2b48c';
+  ctx.beginPath();
+  ctx.ellipse(28, -20, 6, 4, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  // 鼻の穴
+  ctx.fillStyle = '#000';
+  ctx.fillRect(27, -21, 2, 2);
+
+  // 牙
+  ctx.fillStyle = '#fff';
+  ctx.beginPath();
+  ctx.moveTo(22, -12);
+  ctx.lineTo(18, -8);
+  ctx.lineTo(25, -10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.stroke();
+
+  // 目（怒り目つき）
+  ctx.fillStyle = '#ffcc00';
+  ctx.beginPath();
+  ctx.arc(22, -26, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = '#000';
+  ctx.fillRect(21, -27, 2, 2);
+
+  // 足（走るアニメーション用）
+  const legSwing = Math.sin(ph * 10) * 8;
+  ctx.strokeStyle = '#5c2c16';
+  ctx.lineWidth = 4;
+  ctx.lineCap = 'round';
+  
+  // 前足
+  ctx.beginPath();
+  ctx.moveTo(12, 0);
+  ctx.lineTo(12 + legSwing, 12);
+  ctx.stroke();
+  
+  // 後ろ足
+  ctx.beginPath();
+  ctx.moveTo(-12, 0);
+  ctx.lineTo(-12 - legSwing, 12);
+  ctx.stroke();
+
+  ctx.restore();
+}
+
+function draw(){
+  ctx.fillStyle='#8fd3ff';ctx.fillRect(0,0,W,400);
+
+  // 雲（遠景：ゆっくり動く）
+  ctx.fillStyle='#fff';
+  clouds.forEach(c=>{ctx.beginPath();ctx.arc(c.x,c.y,18,0,7);ctx.arc(c.x+20,c.y+4,14,0,7);ctx.arc(c.x-20,c.y+4,14,0,7);ctx.fill();});
+  
+  // 地面
+  ctx.fillStyle='#5b3';ctx.fillRect(0,GY,W,80);
+  ctx.fillStyle='#4a2';for(let i=0;i<20;i++){const x=((i*60-dist)%1200+1200)%1200-60;ctx.fillRect(x,GY+20,30,6);}
+  
+  // 障害物の描画
+  obs.forEach(o=>{
+    ctx.fillStyle=o.type==='high'?'#8844aa':'#666';
+    let oy = o.type==='high' ? GY - o.h - 45 : GY - o.h;
+    ctx.fillRect(o.x-dist, oy, o.w, o.h);
+  });
+
+  // ---- イノシシの描画 (中央のプレイヤー位置基準の相対位置) ----
+  const boarScreenX = PLAYER_X + (boarDist - dist);
+  if(boarScreenX > -50 && boarScreenX < W + 50) {
+    drawBoar(boarScreenX, GY, boarAnimPhase);
+  }
+
+  // 主人公の描画（画面中央 PLAYER_X = 400 に配置 / 無敵中は点滅）
+  if(invincibleTimer<=0 || Math.floor(invincibleTimer*10)%2===0){
+    drawChar(PLAYER_X,GY-py,phase,py>0,ducking);
+  }
+
+  // ---- UI: 左上のハート ----
+  for(let i=0; i<3; i++){
+    drawHeart(20 + i*30, 20, 24, i < lives);
+  }
+
+  // スコアなどのテキスト
+  ctx.fillStyle='#000';ctx.font='bold 16px sans-serif';
+  ctx.fillText(`距離 ${Math.floor(dist/20)} m   ベスト ${best} m`,115,32);
+
+  // ---- UI: リアルタイム腕振りパワーメーター（タコメーター風） ----
+  ctx.fillStyle='rgba(0,0,0,0.3)';
+  ctx.fillRect(115, 42, 160, 14);
+  const powerRatio = Math.min(1, arm*7);
+  ctx.fillStyle = powerRatio > 0.8 ? '#ff3344' : powerRatio > 0.4 ? '#ffaa00' : '#33ccff';
+  ctx.fillRect(117, 44, 156 * powerRatio, 10);
+  ctx.fillStyle='#000';ctx.font='bold 10px sans-serif';
+  ctx.fillText('ARM POWER', 122, 52);
+
+  // ---- 距離感メーター（イノシシとの距離ゲージ） ----
+  ctx.fillStyle='rgba(0,0,0,0.3)';
+  ctx.fillRect(W - 210, 15, 190, 16);
+  // 差分距離 (dist - boarDist) は大きいほど安全、0に近づくと追いつかれる
+  const diffDist = dist - boarDist;
+  const maxDiff = 250; // 最大ゲージ幅の基準差分
+  const ratio = Math.max(0, Math.min(1, diffDist / maxDiff));
+  
+  ctx.fillStyle = ratio < 0.3 ? '#ff2222' : ratio < 0.6 ? '#ffaa00' : '#33cc33';
+  ctx.fillRect(W - 208, 17, 186 * ratio, 12);
+  ctx.fillStyle='#fff';ctx.font='bold 10px sans-serif';
+  ctx.textAlign='center';
+  ctx.fillText(diffDist < 30 ? '⚠️すぐ後ろ！' : '🐗 イノシシとの距離', W - 115, 27);
+  ctx.textAlign='left';
+
+  // 被弾時の画面赤フラッシュ演出
+  if(hitFlash > 0){
+    ctx.fillStyle=`rgba(255, 0, 0, ${hitFlash})`;
+    ctx.fillRect(0, 0, W, 400);
+  }
+
+  if(state!=='run'){
+    ctx.fillStyle='rgba(0,0,0,.55)';ctx.fillRect(0,120,W,140);
+    ctx.fillStyle='#fff';ctx.textAlign='center';ctx.font='bold 30px sans-serif';
+    ctx.fillText(state==='ready'?'腕を振って走れ！':'GAME OVER',W/2,175);
+    ctx.font='18px sans-serif';
+    ctx.fillText(camOK||state==='over'?'クリック / スペースでスタート':'カメラ準備中… クリック / スペースでスタート',W/2,215);
+    ctx.textAlign='left';
+  }
+}
+
+// ---- メインループ ----
+let last=performance.now();
+function tick(t){
+  const dt=Math.min(0.05,(t-last)/1000);last=t;
+  
+  // 慣性：腕を振らないと徐々に減速
+  arm*=Math.pow(0.5,dt*2);
+  if(hitFlash > 0) hitFlash -= dt * 2;
+  
+  if(state==='run'){
+    if(invincibleTimer>0) invincibleTimer-=dt;
+
+    const target=Math.min(1,arm*7)*420;
+    speed+=(target-speed)*Math.min(1,dt*5); // スムーズな加速・減速
+    dist+=speed*dt;
+    phase+=speed*dt*0.05+dt*2*(speed>5?1:0);
+
+    // ---- イノシシの追走ロジック ----
+    boarSpeed = 160; // 基本の追走速度
+    boarDist += boarSpeed * dt;
+
+    // イノシシとプレイヤーの距離が縮まって追いついた場合の処理 (差が15px未満)
+    if((dist - boarDist) < 15) {
+      if(invincibleTimer <= 0) {
+        lives--;
+        invincibleTimer = 1.5;
+        hitFlash = 0.6;
+        boarDist = dist - 120;
+        if(lives <= 0){
+          state = 'over';
+          best = Math.max(best, Math.floor(dist/20));
+        }
+      }
+    }
+
+    // 逆にイノシシがプレイヤーから離れすぎないように制限
+    if((dist - boarDist) > 300) {
+      boarDist = dist - 300;
+    }
+
+    boarAnimPhase += dt * (boarSpeed / 30);
+
+    if(jumpReq&&py===0&&t-lastJump>400){vy=620;lastJump=t;}
+    jumpReq=false;
+
+    if(py>0||vy>0){py+=vy*dt;vy-=1800*dt;if(py<=0){py=0;vy=0;}}
+
+    // 障害物の生成
+    if(dist+W>nextObs){
+      const isHigh=Math.random()<0.35;
+      obs.push({
+        x:nextObs,
+        w:26+Math.random()*15,
+        h:isHigh?24:(30+Math.random()*30),
+        type:isHigh?'high':'normal'
+      });
+      nextObs+=450+Math.random()*350;
+    }
+    obs=obs.filter(o=>o.x-dist>-200);
+
+    // 障害物の衝突判定 (中央 PLAYER_X = 400 付近での判定)
+    for(const o of obs){
+      const ox=o.x-dist;
+      if(ox < PLAYER_X + 15 && ox + o.w > PLAYER_X - 15){
+        let hit=false;
+        if(o.type==='high'){
+          if(!ducking && py<20) hit=true;
+        } else {
+          if(py < o.h-4) hit=true;
+        }
+
+        if(hit && invincibleTimer<=0){
+          lives--;
+          invincibleTimer=1.5;
+          hitFlash=0.6;
+          boarDist += 40; 
+          if(lives<=0){
+            state='over';
+            best=Math.max(best,Math.floor(dist/20));
+          }
+        }
+      }
+    }
+    clouds.forEach(c=>{c.x-=speed*dt*0.1;if(c.x<-40)c.x=W+40;});
+  }
+  jumpReq=false;
+  draw();requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>
